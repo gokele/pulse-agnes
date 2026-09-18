@@ -32,6 +32,8 @@ function Install-PulseAgent {
     # 要统计的挂载点，逗号分隔，如 "C:\,D:\"；默认只看系统盘
     [string]$Disk,
     # 只统计这些网卡，逗号分隔，如 "以太网"；默认自动判断
+    # 注：容器上报（--docker）只有 Linux 有。Windows 的 Docker 走命名管道，
+    # 连它要额外的依赖，而在 Windows 上跑 Docker 的机器本来就少。
     [string]$Iface,
     [string]$Release = 'latest',
     [string]$Repo = 'gokele/pulse-agnes',
