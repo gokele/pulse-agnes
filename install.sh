@@ -7,7 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/gokele/pulse-agnes/main/install.sh \
 #     | sudo bash -s -- --uninstall
 #
-# 重复执行即为升级：换掉二进制并重启服务，节点 ID 与密钥照旧。
+# 重复执行即为升级：换掉二进制并重启服务，节点 ID、密钥、分盘与网卡设置照旧。
 #
 # 二进制与校验和都从 Agent 的发布仓库取，面板只负责接收上报，不分发任何文件。
 # Agent 与服务端各自发版，所以这里是 pulse-agnes 而不是 pulse-releases。
@@ -19,6 +19,8 @@ SERVER="${PULSE_SERVER:-}"
 TOKEN="${PULSE_TOKEN:-}"
 NODE_ID="${PULSE_NODE_ID:-}"
 NODE_NAME="${PULSE_NODE_NAME:-}"
+DISK="${PULSE_DISK:-}"
+IFACE="${PULSE_IFACE:-}"
 BINARY_URL=""
 INSECURE="${PULSE_INSECURE:-0}"
 ACTION="install"
@@ -36,6 +38,8 @@ usage() {
   --token TOKEN     该节点的密钥（必填），在后台「安装命令」里复制
   --id ID           节点 ID，默认主机名
   --name NAME       节点显示名，默认同 ID
+  --disk MOUNTS     要统计的挂载点，逗号分隔，如 /,/data；默认只看根分区
+  --iface NAMES     只统计这些网卡的流量，逗号分隔，如 eth0；默认自动判断
   --release TAG     指定版本，默认 latest
   --repo OWNER/NAME Agent 发布仓库，默认 ${REPO}
   --binary-url URL  直接指定二进制地址（跳过 GitHub 查询与校验和比对）
@@ -57,6 +61,8 @@ while [ $# -gt 0 ]; do
     --token) need_value "$@"; TOKEN="$2"; shift 2 ;;
     --id) need_value "$@"; NODE_ID="$2"; shift 2 ;;
     --name) need_value "$@"; NODE_NAME="$2"; shift 2 ;;
+    --disk) need_value "$@"; DISK="$2"; shift 2 ;;
+    --iface) need_value "$@"; IFACE="$2"; shift 2 ;;
     --release) need_value "$@"; RELEASE="$2"; shift 2 ;;
     --repo) need_value "$@"; REPO="$2"; shift 2 ;;
     --binary-url) need_value "$@"; BINARY_URL="$2"; shift 2 ;;
@@ -99,8 +105,15 @@ fi
 SERVER="${SERVER%/}"
 [ -n "$NODE_NAME" ] || NODE_NAME="$NODE_ID"
 
+# 重复执行是升级：没显式传 --disk / --iface 时沿用上次安装写下的值，
+# 不然升一次级就把分盘、网卡的配置抹掉了
+if [ -f "${CONF_DIR}/agent.env" ]; then
+  [ -n "$DISK" ] || DISK="$(sed -n 's/^PULSE_DISK=//p' "${CONF_DIR}/agent.env" | head -n 1)"
+  [ -n "$IFACE" ] || IFACE="$(sed -n 's/^PULSE_IFACE=//p' "${CONF_DIR}/agent.env" | head -n 1)"
+fi
+
 # 这些值要写进 systemd 的 EnvironmentFile，混入换行会被当成新的环境变量
-for pair in "TOKEN:$TOKEN" "NODE_ID:$NODE_ID" "NODE_NAME:$NODE_NAME" "SERVER:$SERVER"; do
+for pair in "TOKEN:$TOKEN" "NODE_ID:$NODE_ID" "NODE_NAME:$NODE_NAME" "SERVER:$SERVER" "DISK:$DISK" "IFACE:$IFACE"; do
   name="${pair%%:*}"; value="${pair#*:}"
   case "$value" in
     *[$'\n\r']*) echo "${name} 里不能包含换行" >&2; exit 2 ;;
@@ -184,6 +197,8 @@ PULSE_TOKEN=${TOKEN}
 PULSE_NODE_ID=${NODE_ID}
 PULSE_NODE_NAME=${NODE_NAME}
 PULSE_INSECURE=${INSECURE}
+PULSE_DISK=${DISK}
+PULSE_IFACE=${IFACE}
 ENV
 chmod 0600 "${CONF_DIR}/agent.env"
 
