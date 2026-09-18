@@ -21,6 +21,7 @@ NODE_ID="${PULSE_NODE_ID:-}"
 NODE_NAME="${PULSE_NODE_NAME:-}"
 DISK="${PULSE_DISK:-}"
 IFACE="${PULSE_IFACE:-}"
+DOCKER="${PULSE_DOCKER:-}"
 BINARY_URL=""
 INSECURE="${PULSE_INSECURE:-0}"
 ACTION="install"
@@ -40,6 +41,9 @@ usage() {
   --name NAME       节点显示名，默认同 ID
   --disk MOUNTS     要统计的挂载点，逗号分隔，如 /,/data；默认只看根分区
   --iface NAMES     只统计这些网卡的流量，逗号分隔，如 eth0；默认自动判断
+  --docker          上报容器情况（只读）。会把服务账号加进 docker 组，
+                    那等于给了它在本机以 root 起容器的能力，自行权衡
+  --no-docker       关掉容器上报（升级时用来撤掉之前开的）
   --release TAG     指定版本，默认 latest
   --repo OWNER/NAME Agent 发布仓库，默认 ${REPO}
   --binary-url URL  直接指定二进制地址（跳过 GitHub 查询与校验和比对）
@@ -63,6 +67,8 @@ while [ $# -gt 0 ]; do
     --name) need_value "$@"; NODE_NAME="$2"; shift 2 ;;
     --disk) need_value "$@"; DISK="$2"; shift 2 ;;
     --iface) need_value "$@"; IFACE="$2"; shift 2 ;;
+    --docker) DOCKER=1; shift ;;
+    --no-docker) DOCKER=0; shift ;;
     --release) need_value "$@"; RELEASE="$2"; shift 2 ;;
     --repo) need_value "$@"; REPO="$2"; shift 2 ;;
     --binary-url) need_value "$@"; BINARY_URL="$2"; shift 2 ;;
@@ -110,6 +116,7 @@ SERVER="${SERVER%/}"
 if [ -f "${CONF_DIR}/agent.env" ]; then
   [ -n "$DISK" ] || DISK="$(sed -n 's/^PULSE_DISK=//p' "${CONF_DIR}/agent.env" | head -n 1)"
   [ -n "$IFACE" ] || IFACE="$(sed -n 's/^PULSE_IFACE=//p' "${CONF_DIR}/agent.env" | head -n 1)"
+  [ -n "$DOCKER" ] || DOCKER="$(sed -n 's/^PULSE_DOCKER=//p' "${CONF_DIR}/agent.env" | head -n 1)"
 fi
 
 # 这些值要写进 systemd 的 EnvironmentFile，混入换行会被当成新的环境变量
@@ -199,6 +206,7 @@ PULSE_NODE_NAME=${NODE_NAME}
 PULSE_INSECURE=${INSECURE}
 PULSE_DISK=${DISK}
 PULSE_IFACE=${IFACE}
+PULSE_DOCKER=${DOCKER}
 ENV
 chmod 0600 "${CONF_DIR}/agent.env"
 
@@ -216,6 +224,21 @@ fi
 # 不想要这个能力的话，删掉下面两行并去掉 unit 里的 ReadWritePaths。
 chown -R pulse-agent:pulse-agent "$INSTALL_DIR" 2>/dev/null || chown -R pulse-agent "$INSTALL_DIR" 2>/dev/null || true
 chmod 0755 "$INSTALL_DIR"
+
+# 容器上报要能读 /var/run/docker.sock，而那个套接字属于 docker 组。
+# 加进这个组等于给了服务账号在本机以 root 起容器的能力 —— 所以默认不做，
+# 只有显式 --docker 才加，并且当面说清楚。
+DOCKER_SOCKET_UNIT=""
+if [ "$DOCKER" = "1" ]; then
+  if ! getent group docker >/dev/null 2>&1; then
+    echo "这台机器上没有 docker 组，--docker 不会生效（是不是没装 Docker？）" >&2
+  elif usermod -aG docker pulse-agent 2>/dev/null; then
+    echo "已把 pulse-agent 加进 docker 组：它现在能读容器列表，也能在本机起容器"
+    DOCKER_SOCKET_UNIT="/var/run/docker.sock"
+  else
+    echo "把 pulse-agent 加进 docker 组失败，--docker 不会生效" >&2
+  fi
+fi
 
 cat > "/etc/systemd/system/${SERVICE}.service" <<UNIT
 [Unit]
@@ -239,7 +262,7 @@ ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/
 # 自动更新时 Agent 要替换 ${INSTALL_DIR}/pulse-agent，这个目录必须可写
-ReadWritePaths=${INSTALL_DIR}
+ReadWritePaths=${INSTALL_DIR}${DOCKER_SOCKET_UNIT:+ ${DOCKER_SOCKET_UNIT}}
 
 [Install]
 WantedBy=multi-user.target
