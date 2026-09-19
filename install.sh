@@ -39,7 +39,7 @@ usage() {
   --token TOKEN     该节点的密钥（必填），在后台「安装命令」里复制
   --id ID           节点 ID，默认主机名
   --name NAME       节点显示名，默认同 ID
-  --disk MOUNTS     要统计的挂载点，逗号分隔，如 /,/data；默认只看根分区
+  --disk MOUNTS     只统计这些挂载点，逗号分隔，如 /,/data；默认自动找出全部本地盘
   --iface NAMES     只统计这些网卡的流量，逗号分隔，如 eth0；默认自动判断
   --docker          上报容器情况（只读）。会把服务账号加进 docker 组，
                     那等于给了它在本机以 root 起容器的能力，自行权衡
