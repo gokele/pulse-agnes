@@ -82,6 +82,12 @@ function Install-PulseAgent {
       Start-Sleep -Seconds 1
     }
     if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue }
+    # 安装时建的事件日志来源也一并删掉，不留注册表残迹
+    try {
+      if ([System.Diagnostics.EventLog]::SourceExists('pulse-agent')) {
+        [System.Diagnostics.EventLog]::DeleteEventSource('pulse-agent')
+      }
+    } catch { Write-Verbose "清理事件日志来源失败：$_" }
     Write-Host 'pulse-agent 已卸载'
     return
   }
@@ -164,7 +170,18 @@ function Install-PulseAgent {
     # 正在运行的 exe 停掉之后才能覆盖；服务停止有几百毫秒的滞后
     Start-Sleep -Milliseconds 800
   }
-  Move-Item -Force -Path $tmp -Destination $exePath
+  # 先拷到安装目录再原地改名：$env:TEMP 与安装目录不在同一个卷时，
+  # Move-Item 会退化成「复制 + 删除」，中途失败可能留下截断的 exe；
+  # 同目录内的改名是原子的
+  $staging = "$exePath.new"
+  try {
+    Copy-Item -Force -Path $tmp -Destination $staging
+    Move-Item -Force -Path $staging -Destination $exePath
+  }
+  catch {
+    Remove-Item -Force $staging -ErrorAction SilentlyContinue
+    throw
+  }
 
   if (-not $service) {
     # 以 LocalSystem 运行（New-Service 的默认账户）：ICMP 探测要创建 raw socket，

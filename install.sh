@@ -47,7 +47,8 @@ usage() {
   --release TAG     指定版本，默认 latest
   --repo OWNER/NAME Agent 发布仓库，默认 ${REPO}
   --binary-url URL  直接指定二进制地址（跳过 GitHub 查询与校验和比对）
-  --insecure        跳过 TLS 证书校验
+  --insecure        跳过面板 TLS 证书校验（自签证书的面板用；不影响 GitHub 下载）
+  --no-insecure     关掉上面的跳过（升级时用来撤掉之前开的）
   --uninstall       卸载
 USAGE
 }
@@ -73,6 +74,7 @@ while [ $# -gt 0 ]; do
     --repo) need_value "$@"; REPO="$2"; shift 2 ;;
     --binary-url) need_value "$@"; BINARY_URL="$2"; shift 2 ;;
     --insecure) INSECURE=1; shift ;;
+    --no-insecure) INSECURE=0; NO_INSECURE=1; shift ;;
     --uninstall) ACTION="uninstall"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage; exit 2 ;;
@@ -95,6 +97,12 @@ if [ "$ACTION" = "uninstall" ]; then
   rm -f "/etc/systemd/system/${SERVICE}.service"
   rm -rf "$INSTALL_DIR" "$CONF_DIR"
   systemctl daemon-reload
+  # --docker 装的时候把服务账号加进了 docker 组，那等于本机 root 的能力，
+  # 卸载必须一并撤掉；用户和组留着，别的部署可能还在用这个名字
+  if id -u pulse-agent >/dev/null 2>&1; then
+    gpasswd -d pulse-agent docker >/dev/null 2>&1 || true
+    userdel pulse-agent >/dev/null 2>&1 || true
+  fi
   echo "pulse-agent 已卸载"
   exit 0
 fi
@@ -111,12 +119,16 @@ fi
 SERVER="${SERVER%/}"
 [ -n "$NODE_NAME" ] || NODE_NAME="$NODE_ID"
 
-# 重复执行是升级：没显式传 --disk / --iface 时沿用上次安装写下的值，
-# 不然升一次级就把分盘、网卡的配置抹掉了
+# 重复执行是升级：没显式传 --disk / --iface / --docker 时沿用上次安装写下的值，
+# 不然升一次级就把分盘、网卡的配置抹掉了。--insecure 同样沿用（面板用自签
+# 证书的节点，升级后不该突然连不上）；想关掉用 --no-insecure 显式覆盖。
 if [ -f "${CONF_DIR}/agent.env" ]; then
   [ -n "$DISK" ] || DISK="$(sed -n 's/^PULSE_DISK=//p' "${CONF_DIR}/agent.env" | head -n 1)"
   [ -n "$IFACE" ] || IFACE="$(sed -n 's/^PULSE_IFACE=//p' "${CONF_DIR}/agent.env" | head -n 1)"
   [ -n "$DOCKER" ] || DOCKER="$(sed -n 's/^PULSE_DOCKER=//p' "${CONF_DIR}/agent.env" | head -n 1)"
+  if [ "$INSECURE" != "1" ] && [ "$NO_INSECURE" != "1" ]; then
+    [ "$(sed -n 's/^PULSE_INSECURE=//p' "${CONF_DIR}/agent.env" | head -n 1)" = "1" ] && INSECURE=1
+  fi
 fi
 
 # 这些值要写进 systemd 的 EnvironmentFile，混入换行会被当成新的环境变量
@@ -135,8 +147,11 @@ case "$(uname -m)" in
 esac
 ASSET="pulse-agent-linux-${ARCH}"
 
+# 这里下载的只有 GitHub 上的二进制与校验和，证书必须照常校验。
+# --insecure 是给「面板用自签证书」用的，只写进 PULSE_INSECURE 交给 Agent；
+# 给这里的 curl 加 -k 的话，中间人可以连二进制带校验和一起换，
+# SHA-256 比对的就是攻击者的哈希了。
 CURL_OPTS=(-fsSL --retry 3 --connect-timeout 15)
-[ "$INSECURE" = "1" ] && CURL_OPTS+=(-k)
 
 mkdir -p "$INSTALL_DIR" "$CONF_DIR"
 TMP="$(mktemp)"
@@ -260,6 +275,16 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# 探测与上报只要 IPv4/IPv6，容器上报再要一个 Unix 套接字
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadOnlyPaths=/
 # 自动更新时 Agent 要替换 ${INSTALL_DIR}/pulse-agent，这个目录必须可写
 ReadWritePaths=${INSTALL_DIR}${DOCKER_SOCKET_UNIT:+ ${DOCKER_SOCKET_UNIT}}
