@@ -24,6 +24,9 @@ IFACE="${PULSE_IFACE:-}"
 DOCKER="${PULSE_DOCKER:-}"
 BINARY_URL=""
 INSECURE="${PULSE_INSECURE:-0}"
+# NO_INSECURE 表示用户显式传了 --no-insecure：沿用旧配置时不再继承 PULSE_INSECURE。
+# 必须给默认值——set -u 下引用未赋值变量会让整个脚本在升级路径上直接炸掉。
+NO_INSECURE=0
 ACTION="install"
 
 INSTALL_DIR="/opt/pulse-agent"
@@ -151,7 +154,7 @@ ASSET="pulse-agent-linux-${ARCH}"
 # --insecure 是给「面板用自签证书」用的，只写进 PULSE_INSECURE 交给 Agent；
 # 给这里的 curl 加 -k 的话，中间人可以连二进制带校验和一起换，
 # SHA-256 比对的就是攻击者的哈希了。
-CURL_OPTS=(-fsSL --retry 3 --connect-timeout 15)
+CURL_OPTS=(-fsSL --retry 3 --connect-timeout 15 --max-time 300)
 
 mkdir -p "$INSTALL_DIR" "$CONF_DIR"
 TMP="$(mktemp)"
@@ -213,6 +216,11 @@ fi
 
 install -m 0755 "$TMP" "${INSTALL_DIR}/pulse-agent"
 
+# 清掉旧版本留下的自动更新残迹：.bak 是上一版二进制的备份、.badver 是「起不来
+# 的版本」标记。新装上的这份是运营者亲手验证过的，残留的备份会让它一启动就被
+# 误判成「更新失败」当场回滚，标记则会让它永远等不到本该更新的版本。
+rm -f "${INSTALL_DIR}/pulse-agent.bak" "${INSTALL_DIR}/pulse-agent.badver"
+
 cat > "${CONF_DIR}/agent.env" <<ENV
 PULSE_SERVER=${SERVER}
 PULSE_TOKEN=${TOKEN}
@@ -253,6 +261,11 @@ if [ "$DOCKER" = "1" ]; then
   else
     echo "把 pulse-agent 加进 docker 组失败，--docker 不会生效" >&2
   fi
+else
+  # 之前用 --docker 装过、这次没带：把组员资格一并撤掉。
+  # 加组的入口是显式的，撤掉也该跟着显式的「没带 --docker」走，
+  # 不能留着一个等于本机 root 的权限没人记得。
+  gpasswd -d pulse-agent docker >/dev/null 2>&1 || true
 fi
 
 cat > "/etc/systemd/system/${SERVICE}.service" <<UNIT
@@ -273,9 +286,14 @@ AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# read-only 而不是完全遮蔽：不少机器的数据盘挂在 /home 下，遮死了这些盘
+# 会从「硬盘」里消失、statfs 也读不到。只读足够挡住写入。
+ProtectHome=read-only
 PrivateTmp=true
+# 私有 /dev 之上给 NVIDIA 留口子：显卡实时状态要 /dev/nvidiactl 与各 /dev/nvidiaN。
+# 没有显卡的机器这几条不生效，白写无害。
 PrivateDevices=true
+DeviceAllow=/dev/nvidia rw
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

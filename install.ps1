@@ -41,6 +41,8 @@ function Install-PulseAgent {
     [string]$BinaryUrl,
     # 跳过 TLS 证书校验（面板用自签证书时）
     [switch]$Insecure,
+    # 显式关掉沿用的「跳过证书校验」（升级时不再继承上次安装的 -Insecure）
+    [switch]$NoInsecure,
     [switch]$Uninstall
   )
 
@@ -99,10 +101,13 @@ function Install-PulseAgent {
   if (-not $Name) { $Name = $Id }
 
   # 重复执行是升级：没显式传的项沿用上次写下的值，
-  # 不然升一次级就把分盘、网卡的配置抹掉了
+  # 不然升一次级就把分盘、网卡的配置抹掉了。
+  # 面板用自签证书的节点，升级后不该突然连不上，所以 -Insecure 也沿用；
+  # 想关掉用 -NoInsecure 显式覆盖（与 Linux 侧的 --no-insecure 对称）
   $previous = Get-PulseAgentEnv -ServiceKey $serviceKey
   if (-not $Disk) { $Disk = $previous['PULSE_DISK'] }
   if (-not $Iface) { $Iface = $previous['PULSE_IFACE'] }
+  if (-not $Insecure -and -not $NoInsecure -and $previous['PULSE_INSECURE'] -eq '1') { $Insecure = $true }
 
   switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { $arch = 'amd64' }
@@ -119,7 +124,7 @@ function Install-PulseAgent {
   try {
     if ($BinaryUrl) {
       Write-Host "下载 $BinaryUrl（已指定直链，跳过校验和比对）"
-      Invoke-WebRequest -Uri $BinaryUrl -OutFile $tmp -UseBasicParsing
+      Invoke-WebRequest -Uri $BinaryUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 300
     }
     else {
       $base = if ($Release -eq 'latest') {
@@ -129,11 +134,11 @@ function Install-PulseAgent {
         "https://github.com/$Repo/releases/download/$Release"
       }
       Write-Host "下载 $base/$asset"
-      Invoke-WebRequest -Uri "$base/$asset" -OutFile $tmp -UseBasicParsing
+      Invoke-WebRequest -Uri "$base/$asset" -OutFile $tmp -UseBasicParsing -TimeoutSec 300
 
       $sumsPath = "$tmp.checksums"
       try {
-        Invoke-WebRequest -Uri "$base/checksums.txt" -OutFile $sumsPath -UseBasicParsing
+        Invoke-WebRequest -Uri "$base/checksums.txt" -OutFile $sumsPath -UseBasicParsing -TimeoutSec 60
       }
       catch {
         throw '下载 checksums.txt 失败，无法校验可执行文件，已放弃安装'
@@ -181,6 +186,13 @@ function Install-PulseAgent {
   catch {
     Remove-Item -Force $staging -ErrorAction SilentlyContinue
     throw
+  }
+
+  # 清掉旧版本留下的自动更新残迹（.old 备份、.bad 起不来的版本、.badver 标记）：
+  # 新装上的这份是运营者亲手验证过的，残留的备份会让它一启动就被误判成
+  # 「更新失败」当场回滚，标记则会让它永远等不到本该更新的版本
+  foreach ($suffix in '.old', '.bad', '.badver') {
+    Remove-Item -Force -ErrorAction SilentlyContinue "$exePath$suffix"
   }
 
   if (-not $service) {
