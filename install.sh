@@ -290,10 +290,10 @@ ProtectSystem=strict
 # 会从「硬盘」里消失、statfs 也读不到。只读足够挡住写入。
 ProtectHome=read-only
 PrivateTmp=true
-# 私有 /dev 之上给 NVIDIA 留口子：显卡实时状态要 /dev/nvidiactl 与各 /dev/nvidiaN。
-# 没有显卡的机器这几条不生效，白写无害。
-PrivateDevices=true
-DeviceAllow=/dev/nvidia rw
+# 保留显卡设备节点，用设备访问策略限制可读写范围。
+PrivateDevices=false
+DevicePolicy=closed
+DeviceAllow=char-nvidia* rw
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
